@@ -10,6 +10,10 @@ __pycache__/
 *.so
 .Python
 
+# 로그 파일
+logs/
+*.log
+
 # 엑셀 파일 (선택사항)
 *.xlsx
 *.xls
