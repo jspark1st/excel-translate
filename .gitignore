@@ -1,0 +1,27 @@
+# 가상 환경
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 엑셀 파일 (선택사항)
+*.xlsx
+*.xls
+*_translated.xlsx
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
