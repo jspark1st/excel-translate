@@ -11,7 +11,7 @@ from typing import Union
 import time
 import traceback
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from logger_config import setup_logger
 from httpcore._exceptions import ReadTimeout
 from httpx import Timeout
@@ -64,6 +64,56 @@ class ExcelTranslator:
         self.should_stop = False  # 번역 중지 플래그
         
         logger.debug("ExcelTranslator 초기화 완료")
+    
+    def _is_date_format(self, number_format: str) -> bool:
+        """
+        number_format이 날짜 형식인지 확인
+        
+        Args:
+            number_format: Excel number_format 문자열
+            
+        Returns:
+            날짜 형식이면 True, 아니면 False
+        """
+        if not number_format:
+            return False
+        
+        # Excel 날짜 형식 패턴 (일반적인 패턴들)
+        date_patterns = [
+            'yyyy', 'yy',  # 연도
+            'mm', 'm',     # 월
+            'dd', 'd',     # 일
+            'hh', 'h',     # 시간
+            'ss', 's',     # 초
+            '年', '月', '日',  # 한자 날짜
+            'am/pm', 'a/p',  # 오전/오후
+        ]
+        
+        number_format_lower = number_format.lower()
+        # 날짜 관련 패턴이 2개 이상 포함되어 있으면 날짜 형식으로 간주
+        pattern_count = sum(1 for pattern in date_patterns if pattern in number_format_lower)
+        return pattern_count >= 2
+    
+    def _excel_date_to_string(self, serial_number: Union[int, float]) -> str:
+        """
+        Excel 날짜 시리얼 번호를 날짜 문자열로 변환
+        
+        Args:
+            serial_number: Excel 날짜 시리얼 번호 (예: 45658 = 2025-01-01)
+            
+        Returns:
+            날짜 문자열 (예: "2025년 01월 01일")
+        """
+        try:
+            # Excel의 날짜 시작점: 1899-12-30 (시리얼 번호 0)
+            excel_epoch = datetime(1899, 12, 30)
+            date_value = excel_epoch + timedelta(days=serial_number)
+            
+            # 한국어 형식으로 변환
+            return date_value.strftime("%Y년 %m월 %d일")
+        except (ValueError, OverflowError, OSError) as e:
+            logger.warning(f"날짜 변환 실패: {serial_number} - {str(e)}")
+            return str(serial_number)
     
     def _translate_header_cell(self, text: str) -> str:
         """
@@ -305,13 +355,14 @@ class ExcelTranslator:
             
             return text_str if 'text_str' in locals() else str(text)  # 오류 발생 시 원문 반환
     
-    def translate_dataframe(self, df: pd.DataFrame, sheet_name: str = "") -> pd.DataFrame:
+    def translate_dataframe(self, df: pd.DataFrame, sheet_name: str = "", source_ws=None) -> pd.DataFrame:
         """
         DataFrame의 모든 셀을 번역
         
         Args:
             df: 번역할 DataFrame
             sheet_name: 시트 이름 (로깅용)
+            source_ws: 원본 워크시트 (openpyxl, 날짜 형식 확인용)
             
         Returns:
             번역된 DataFrame
@@ -328,16 +379,58 @@ class ExcelTranslator:
         # 컬럼명(헤더) 번역
         translated_columns = {}
         logger.info("컬럼명(헤더) 번역 시작")
-        for col in df.columns:
+        for col_idx, col in enumerate(df.columns):
             if self.should_stop:
                 raise InterruptedError("번역이 사용자에 의해 중지되었습니다.")
-            translated_col = self.translate_text(col)
+            
+            # 원본 워크시트가 있으면 날짜 형식 확인
+            col_str = None
+            if source_ws:
+                try:
+                    # openpyxl은 1-based index
+                    source_cell = source_ws.cell(row=1, column=col_idx + 1)
+                    source_value = source_cell.value
+                    
+                    # 디버그: 셀 정보 출력
+                    logger.info(f"컬럼 {col_idx + 1}: value={source_value}, type={type(source_value)}, number_format='{source_cell.number_format}'")
+                    
+                    # 날짜 시리얼 번호인지 확인
+                    if isinstance(source_value, (int, float)):
+                        # 날짜 형식 체크
+                        is_date_format = source_cell.number_format and self._is_date_format(source_cell.number_format)
+                        
+                        # 날짜 시리얼 번호 범위 체크 (2015-01-01 ~ 2099-12-31)
+                        # 엑셀 날짜 시리얼: 42005 = 2015-01-01, 73050 = 2099-12-31
+                        # 너무 작은 숫자(예: 717)는 제외하여 일반 숫자와 구분
+                        is_date_range = 42000 <= source_value <= 73050
+                        
+                        logger.info(f"날짜 형식 확인: '{source_cell.number_format}' -> 형식={is_date_format}, 범위={is_date_range}")
+                        
+                        # 날짜 형식이거나 날짜 범위에 있으면 날짜로 변환
+                        if is_date_format or is_date_range:
+                            # 날짜 시리얼 번호를 날짜 문자열로 변환
+                            col_str = self._excel_date_to_string(source_value)
+                            logger.info(f"컬럼 날짜 시리얼 번호 변환: {source_value} -> '{col_str}'")
+                except Exception as e:
+                    logger.warning(f"원본 워크시트에서 컬럼 값 읽기 실패: {str(e)}")
+            
+            # 원본에서 읽지 못했으면 DataFrame의 컬럼명 사용
+            if col_str is None:
+                col_str = str(col).strip() if col is not None else ""
+            
+            # 헤더는 항상 번역 시도 (숫자 체크 건너뛰기)
+            if col_str:
+                translated_col = self._translate_header_cell(col_str)
+            else:
+                translated_col = col_str
             translated_columns[col] = translated_col
             logger.debug(f"컬럼명 번역: '{col}' -> '{translated_col}'")
         
         # 번역된 컬럼명으로 DataFrame 컬럼명 변경
-        translated_df.columns = [translated_columns.get(col, col) for col in df.columns]
+        # 모든 컬럼명을 문자열로 명시적 변환
+        translated_df.columns = [str(translated_columns.get(col, col)) for col in df.columns]
         logger.info("컬럼명(헤더) 번역 완료")
+        logger.debug(f"변경된 컬럼명: {list(translated_df.columns)}")
         
         for col_idx, col in enumerate(df.columns, 1):
             # 중지 플래그 확인
@@ -400,7 +493,10 @@ class ExcelTranslator:
         
         # 원본 파일의 모든 행과 열 복사 (서식 완벽 유지)
         max_row = source_ws.max_row  # 원본 파일의 모든 행
-        max_col = source_ws.max_column  # 원본 파일의 모든 열
+        # DataFrame의 실제 컬럼 수와 openpyxl의 max_column 중 더 큰 값 사용
+        # 두 번째 시트 등에서 max_column이 실제 데이터 범위보다 작을 수 있음
+        max_col = max(len(translated_df.columns), source_ws.max_column) if len(translated_df.columns) > 0 else source_ws.max_column
+        logger.debug(f"시트 '{sheet_name}' - DataFrame 컬럼 수: {len(translated_df.columns)}, source_ws.max_column: {source_ws.max_column}, 사용할 max_col: {max_col}")
         
         # 모든 컬럼 너비 복사
         for col_idx in range(1, max_col + 1):
@@ -447,28 +543,28 @@ class ExcelTranslator:
                 
                 # 번역된 데이터 쓰기 (데이터가 있는 부분만)
                 if row_idx == 1:
-                    # 헤더 행 - 원본 파일의 첫 행을 직접 읽어서 번역
-                    source_value = source_cell.value
-                    if source_value is not None:
-                        # 헤더 행의 경우 숫자도 문자열로 변환하여 번역 시도
-                        # 숫자로 시작하는 헤더(예: "1月份")도 번역되도록 처리
-                        if isinstance(source_value, (int, float)):
-                            # 순수 숫자인 경우 문자열로 변환
-                            source_value_str = str(source_value)
-                        else:
-                            source_value_str = str(source_value).strip()
+                    # 헤더 행 - 이미 translate_dataframe에서 번역된 컬럼명 사용
+                    if col_idx <= len(translated_df.columns):
+                        # DataFrame에서 번역된 컬럼명 직접 가져오기
+                        translated_header_value = translated_df.columns[col_idx - 1]
                         
-                        # 빈 문자열이 아니면 번역 시도
-                        if source_value_str:
-                            # 헤더는 항상 번역 시도 (숫자 체크 건너뛰기)
-                            translated_header_value = self._translate_header_cell(source_value_str)
-                            output_cell.value = translated_header_value
-                            logger.debug(f"헤더 셀 번역: '{source_value}' -> '{translated_header_value}'")
-                        else:
-                            output_cell.value = None
+                        # datetime 객체나 다른 타입일 수 있으므로 문자열로 명시적 변환
+                        if not isinstance(translated_header_value, str):
+                            translated_header_value = str(translated_header_value)
+                            logger.debug(f"헤더 값을 문자열로 변환: {type(translated_df.columns[col_idx - 1])} -> str")
+                        
+                        # 원본이 날짜 형식이었다면 텍스트 형식을 먼저 설정
+                        # (값을 쓰기 전에 형식을 설정해야 올바르게 표시됨)
+                        if source_cell.number_format and self._is_date_format(source_cell.number_format):
+                            output_cell.number_format = '@'  # 텍스트 형식
+                            logger.debug(f"헤더 셀 날짜 형식 -> 텍스트 형식으로 변경: '{source_cell.number_format}' -> '@'")
+                        
+                        # 형식 설정 후 값 쓰기
+                        output_cell.value = translated_header_value
+                        logger.debug(f"헤더 셀 쓰기: 컬럼 {col_idx} -> '{translated_header_value}'")
                     else:
-                        # 빈 셀은 그대로 유지
-                        output_cell.value = None
+                        # DataFrame 범위를 벗어난 열은 원본 값 유지
+                        output_cell.value = source_cell.value
                 else:
                     # 데이터 행
                     df_row_idx = row_idx - 2  # 헤더(1) 제외하고 0부터 시작
@@ -579,8 +675,8 @@ class ExcelTranslator:
                     logger.info(f"시트 '{sheet_name}' 읽기 완료 (행: {len(df)}, 열: {len(df.columns)})")
                     print(f"  행 수: {len(df)}, 열 수: {len(df.columns)}")
                     
-                    # 번역
-                    translated_df = self.translate_dataframe(df, sheet_name=sheet_name)
+                    # 번역 (원본 워크시트 전달하여 날짜 형식 확인)
+                    translated_df = self.translate_dataframe(df, sheet_name=sheet_name, source_ws=source_ws)
                     
                     # 새 시트 생성
                     output_ws = output_wb.create_sheet(title=sheet_name)

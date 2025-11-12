@@ -247,12 +247,11 @@ class ExcelTranslateGUI:
             if file_path:
                 logger.info(f"입력 파일 선택: {file_path}")
                 self.input_file_path.set(file_path)
-                # 출력 파일 경로 자동 설정
-                if not self.output_file_path.get():
-                    base_name = os.path.splitext(file_path)[0]
-                    output_path = f"{base_name}_translated.xlsx"
-                    self.output_file_path.set(output_path)
-                    logger.debug(f"출력 파일 경로 자동 설정: {output_path}")
+                # 출력 파일 경로 자동 설정 (입력 파일과 같은 폴더에 '_translated' 추가)
+                base_name = os.path.splitext(file_path)[0]
+                output_path = f"{base_name}_translated.xlsx"
+                self.output_file_path.set(output_path)
+                logger.debug(f"출력 파일 경로 자동 설정: {output_path}")
                 self.log_message(f"입력 파일 선택: {os.path.basename(file_path)}")
             else:
                 logger.debug("파일 선택 취소됨")
